@@ -8,13 +8,15 @@
 //!    自带 Dobby，仅在无宿主时触发。
 //!
 //! 初始化顺序（插件模式）：
-//! bind 宿主 API → 读配置（chonggou.json）→ 起诊断 HTTP（18765，被占顺延）
-//! → 注册游戏初始化回调 → install_all（全部走 guard + 全量日志）
+//! bind 宿主 API → 读配置（外部媒体目录优先 → 宿主目录 → 内存默认）
+//! → 起诊断 HTTP（18765，被占顺延）→ 注册游戏初始化回调
+//! → install_all（denylist → prologue → 全量日志）
 
 #[macro_use]
 pub mod logging;
 
 pub mod config;
+pub mod denylist;
 pub mod guard;
 pub mod host;
 pub mod hooks;
@@ -75,7 +77,8 @@ unsafe extern "C" fn on_game_initialized(_ud: *mut c_void) {
     host::host_log(3, "chonggou", "loaded (plugin mode, conflict guard active)");
 }
 
-/// 宿主数据目录（Hachimi data dir，用户可通过文件管理器改配置）。
+/// 宿主数据目录（Hachimi data dir；开「使用内部文件目录」后是 /data/data，
+/// 摸不到也无所谓 —— 配置有外部媒体目录与内存默认两层兜底）。
 fn host_base_dir() -> Option<String> {
     let f = host::api_lookup("hachimi_get_base_dir")?;
     type BaseDirFn = unsafe extern "C" fn() -> *const std::os::raw::c_char;
