@@ -1,26 +1,19 @@
 //! Guard 管理的全部 hook。
 //!
-//! 规则：
-//! - 所有目标先查宿主 hook 目录（README 冲突矩阵），只挑**补集**；
-//! - 安装一律走 host::hook_guarded，guard 拒绝即跳过并记日志；
-//! - hook 内先链回原函数（trampoline），再叠加观测。
+//! 三道闸，一个都不能少：
+//! 1. **denylist 类清单**（src/denylist.rs）—— 宿主 hook 过的类直接拒绝；
+//! 2. **prologue 探测**（guard::decide）—— 目标方法首指令已是跳板就让路；
+//! 3. 安装一律走 host::hook_guarded，任何拒绝都记日志。
 
 use std::os::raw::c_void;
 
 use crate::host;
 
-// ============ UnityEngine.CoreModule / Application ============
-
-static mut ORIG_SET_TARGET_FRAME_RATE: usize = 0;
-
-pub unsafe extern "C" fn hook_set_target_frame_rate(this: *mut c_void, rate: i32) {
-    chlog!(info, "Application.set_targetFrameRate({rate})");
-    let orig: unsafe extern "C" fn(*mut c_void, i32) =
-        std::mem::transmute(orig_for(hook_set_target_frame_rate as usize, ORIG_SET_TARGET_FRAME_RATE));
-    orig(this, rate);
-}
-
 // ============ UnityEngine.CoreModule / PlayableDirector（育成演出取证） ============
+//
+// 选它的原因：PlayableDirector **不在宿主 hook 清单**（实查 Hachimi-Edge
+// src/il2cpp/hook/**），是干净目标；且它是育成 cut-in / 演出的播放入口，
+// 是 3 帧化（docs 见 training_anim.rs）的观测点。
 
 static mut ORIG_PLAY_0: usize = 0;
 static mut ORIG_PLAY_1: usize = 0;
@@ -50,21 +43,10 @@ fn orig_for(hook_fn: usize, fallback: usize) -> usize {
     }
 }
 
-/// 全量安装。每个目标都可能被 guard 拒绝 —— 拒绝即跳过，绝不影响宿主。
+/// 全量安装。每个目标都可能被闸门拒绝 —— 拒绝即跳过，绝不影响宿主。
 pub fn install_all() {
-    let targets: [(u8, Option<&'static str>, &'static str, &'static str, &'static str, &'static str, i32, usize); 3] = [
+    let targets: [(Option<&'static str>, &'static str, &'static str, &'static str, &'static str, i32, usize); 2] = [
         (
-            0,
-            None,
-            "UnityEngine.CoreModule",
-            "UnityEngine",
-            "Application",
-            "set_targetFrameRate",
-            1,
-            hook_set_target_frame_rate as usize,
-        ),
-        (
-            1,
             None,
             "UnityEngine.CoreModule",
             "UnityEngine.Playables",
@@ -74,7 +56,6 @@ pub fn install_all() {
             hook_play_0 as usize,
         ),
         (
-            2,
             None,
             "UnityEngine.CoreModule",
             "UnityEngine.Playables",
@@ -85,17 +66,22 @@ pub fn install_all() {
         ),
     ];
 
-    for (slot, sym, asm, ns, cls, mth, args, hook_fn) in targets {
+    for (sym, asm, ns, cls, mth, args, hook_fn) in targets {
+        // 第 0 道闸：类级 denylist
+        if crate::denylist::class_denied(cls) {
+            chlog!(warn, "拒绝 {cls}::{mth}：类在宿主 hook 清单（docs/CONFLICTS.md）");
+            continue;
+        }
         let Some(orig) = host::get_method_addr(asm, ns, cls, mth, args) else {
             chlog!(warn, "resolve 失败: {cls}::{mth}/{args}");
             continue;
         };
+        // 第 2 道闸：prologue 探测（在 hook_guarded 内）
         match host::hook_guarded(orig, hook_fn, sym) {
             Ok(tramp) => {
                 unsafe {
-                    match slot {
-                        0 => ORIG_SET_TARGET_FRAME_RATE = tramp,
-                        1 => ORIG_PLAY_0 = tramp,
+                    match hook_fn {
+                        x if x == hook_play_0 as usize => ORIG_PLAY_0 = tramp,
                         _ => ORIG_PLAY_1 = tramp,
                     }
                 }
