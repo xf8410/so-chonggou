@@ -1,14 +1,15 @@
 //! 独立模式：无宿主 Hachimi 时直接作为 libmain.so 注入。
-//! 仅在此模式下使用本 SO 自带的 Dobby；与宿主共存时该模式不会被触发。
 //!
-//! v1 限制（日志里会写明）：独立模式没有宿主 API，hooks::install_all 的
-//! il2cpp 解析会全部 MISS —— 本模式 v1 只提供 诊断HTTP + 观测 hook（Dobby
-//! do_dlopen）+ 配置/日志。完整 hook 在插件模式下使用。
+//! v1 设计（**零 hook 引擎**）：
+//! - 不再自带 Dobby —— 全进程保持"只有宿主一套 inline patch"的原则；
+//! - libil2cpp 的就绪检测不用 hook do_dlopen，改为后台线程 500ms 轮询
+//!   `/proc/self/maps` —— 零侵入，等价信息；
+//! - v1 限制（日志里会写明）：独立模式没有宿主 API，hooks::install_all 的
+//!   il2cpp 解析会全部 MISS —— 本模式只提供 诊断HTTP + 配置/日志。
+//!   完整 hook 在插件模式下使用。
 
-use std::ffi::{c_char, c_void, CStr};
+use std::ffi::c_void;
 use once_cell::sync::OnceCell;
-
-use crate::guard;
 
 #[cfg(target_os = "android")]
 #[allow(dead_code)]
@@ -24,25 +25,25 @@ pub extern "C" fn JNI_OnLoad(vm: jni::JavaVM, reserved: *mut c_void) -> jni::sys
             .with_tag("chonggou")
             .with_max_level(log::LevelFilter::Info),
     );
-    chlog!(info, "standalone JNI_OnLoad");
+    chlog!(info, "standalone JNI_OnLoad（零 hook 引擎，maps 轮询模式）");
 
     crate::config::init(None);
     crate::http_diag::start(None);
 
     unsafe {
         let handle = libc::dlopen(
-            CStr::from_bytes_with_nul(b"libmain_orig.so\0").unwrap().as_ptr(),
+            std::ffi::CStr::from_bytes_with_nul(b"libmain_orig.so\0").unwrap().as_ptr(),
             libc::RTLD_LAZY,
         );
         if !handle.is_null() {
             type JniOnLoadFn = extern "C" fn(vm: jni::JavaVM, reserved: *mut c_void) -> jni::sys::jint;
-            let orig: JniOnLoadFn = std::mem::transmute(libc::dlsym(handle, c"JNI_OnLoad".as_ptr()));
+            let orig_fn: JniOnLoadFn = std::mem::transmute(libc::dlsym(handle, c"JNI_OnLoad".as_ptr()));
             let vm_ptr = vm.get_java_vm_pointer();
             let _ = JAVA_VM.set(vm);
-            install_standalone_hooks();
+            start_il2cpp_watch();
             // JavaVM 已被 move 进 OnceCell，从 raw 重建一份给原函数
             return match jni::JavaVM::from_raw(vm_ptr) {
-                Ok(vm_for_orig) => orig(vm_for_orig, reserved),
+                Ok(vm_for_orig) => orig_fn(vm_for_orig, reserved),
                 Err(e) => {
                     chlog!(error, "standalone: JavaVM::from_raw 失败({e:?})，跳过原 JNI_OnLoad");
                     -1
@@ -54,56 +55,30 @@ pub extern "C" fn JNI_OnLoad(vm: jni::JavaVM, reserved: *mut c_void) -> jni::sys
     -1
 }
 
-/// 独立模式 hook 安装：同样先过 guard（denylist + prologue 探测）。
-fn install_standalone_hooks() {
-    let addr = unsafe { dobby_rs::resolve_symbol("linker64", "__dl__Z9do_dlopenPKciPK17android_dlextinfoPKv") };
-    match addr {
-        Some(a) if !a.is_null() => {
-            match guard::decide(a as usize, Some("__dl__Z9do_dlopenPKciPK17android_dlextinfoPKv")) {
-                guard::HookDecision::Allow(target) => {
-                    let result = unsafe { dobby_rs::hook(target as *mut c_void, on_do_dlopen as *mut c_void) };
-                    match result {
-                        Ok(tramp) => {
-                            guard::register_own_hook(target as usize, on_do_dlopen as usize);
-                            DO_DLOPEN_TRAMP.store(tramp as usize, std::sync::atomic::Ordering::Release);
-                            chlog!(info, "standalone: hooked do_dlopen @ {target:#x}");
-                        }
-                        Err(e) => chlog!(warn, "standalone: do_dlopen hook 失败: {e}"),
-                    }
-                }
-                guard::HookDecision::AlreadyHooked => {
-                    chlog!(info, "standalone: do_dlopen 已被别人 hook，让路");
-                }
-                guard::HookDecision::DeniedByHost => {
-                    chlog!(warn, "standalone: do_dlopen 命中 denylist（不应出现于独立模式）");
-                }
-                guard::HookDecision::InvalidTarget => {
-                    chlog!(warn, "standalone: do_dlopen 地址无效");
-                }
+/// 后台轮询 /proc/self/maps，等 libil2cpp.so 映射后触发解析。
+/// 无 hook、无补丁 —— 纯观察。
+#[cfg(target_os = "android")]
+fn start_il2cpp_watch() {
+    let spawned = std::thread::Builder::new()
+        .name("chonggou-il2cpp-watch".to_owned())
+        .spawn(|| loop {
+            if maps_contain("libil2cpp.so") {
+                chlog!(info, "standalone: libil2cpp 已映射（无宿主 API，install_all 的解析会全 MISS 并写日志）");
+                crate::hooks::install_all();
+                crate::training_anim::resolve_candidates();
+                break;
             }
-        }
-        _ => chlog!(warn, "standalone: do_dlopen 符号未解析"),
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        });
+    if spawned.is_err() {
+        chlog!(warn, "standalone: il2cpp 观察线程启动失败");
     }
 }
 
-static DO_DLOPEN_TRAMP: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-
-type DoDlopenFn = extern "C" fn(filename: *const c_char, flags: i32, extinfo: *const c_void, caller: *const c_void) -> *mut c_void;
-
-extern "C" fn on_do_dlopen(filename: *const c_char, flags: i32, extinfo: *const c_void, caller: *const c_void) -> *mut c_void {
-    let tramp_addr = DO_DLOPEN_TRAMP.load(std::sync::atomic::Ordering::Acquire);
-    if tramp_addr == 0 {
-        return std::ptr::null_mut();
-    }
-    let tramp: DoDlopenFn = unsafe { std::mem::transmute(tramp_addr) };
-    let handle = tramp(filename, flags, extinfo, caller);
-    if !filename.is_null() {
-        let name = unsafe { CStr::from_ptr(filename) }.to_string_lossy();
-        if name.contains("libil2cpp") {
-            chlog!(info, "standalone: libil2cpp 已加载（无宿主 API，install_all 的解析会全 MISS 并写日志）");
-            crate::hooks::install_all();
-            crate::training_anim::resolve_candidates();
-        }
-    }
-    handle
+/// /proc/self/maps 是否包含目标串（读失败按 false，不 panic）。
+#[cfg(target_os = "android")]
+fn maps_contain(needle: &str) -> bool {
+    std::fs::read_to_string("/proc/self/maps")
+        .map(|m| m.contains(needle))
+        .unwrap_or(false)
 }
