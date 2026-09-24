@@ -1,0 +1,127 @@
+//! 宿主 API 层：插件模式下所有 il2cpp 访问与 hook 都借道宿主，
+//! 本 SO **不引入第二套 inline hook 引擎**，从根源上避免冲突。
+
+use std::ffi::{c_char, c_void, CStr, CString};
+use once_cell::sync::OnceCell;
+
+pub type GetApiFn = extern "C" fn(name: *const c_char) -> *mut c_void;
+
+// 宿主导出的 API 名（与 Hachimi-Edge src/core/plugin_api.rs 对齐）
+type InterceptorHookFn = unsafe extern "C" fn(this: *mut c_void, orig: *mut c_void, hook: *mut c_void) -> *mut c_void;
+type GetTrampolineFn = unsafe extern "C" fn(this: *mut c_void, hook_addr: *mut c_void) -> *mut c_void;
+type ResolveSymbolFn = unsafe extern "C" fn(name: *const c_char) -> *mut c_void;
+type GetImageFn = unsafe extern "C" fn(name: *const c_char) -> *const c_void;
+type GetClassFn = unsafe extern "C" fn(image: *const c_void, ns: *const c_char, cls: *const c_char) -> *mut c_void;
+type GetMethodAddrFn = unsafe extern "C" fn(class: *mut c_void, name: *const c_char, args: i32) -> *mut c_void;
+type LogFn = unsafe extern "C" fn(level: i32, target: *const c_char, message: *const c_char);
+
+static GET_API: OnceCell<GetApiFn> = OnceCell::new();
+static HOST_INTERCEPTOR: OnceCell<usize> = OnceCell::new();
+
+fn api(name: &str) -> Option<usize> {
+    let get_api = *GET_API.get()?;
+    let c = CString::new(name).ok()?;
+    let ptr = get_api(c.as_ptr());
+    if ptr.is_null() { None } else { Some(ptr as usize) }
+}
+
+/// 由 hachimi_init_v3 注入。
+pub fn bind(get_api: GetApiFn) {
+    let _ = GET_API.set(get_api);
+    if let Some(h) = api("hachimi_get_interceptor") {
+        let f: extern "C" fn(*mut c_void) -> *mut c_void = unsafe { std::mem::transmute(h) };
+        let type GetInstance = ();
+        let _ = type_get_instance_marker(f);
+    }
+}
+
+// 占位以保持类型清晰（见 bind_interceptor）
+fn type_get_instance_marker(_f: extern "C" fn(*mut c_void) -> *mut c_void) {}
+
+fn interceptor() -> Option<usize> {
+    if let Some(v) = *HOST_INTERCEPTOR.get() {
+        return Some(v);
+    }
+    // hachimi_instance() -> hachimi_get_interceptor(instance)
+    let instance_f: extern "C" fn() -> *mut c_void = unsafe { std::mem::transmute(api("hachimi_instance")?) };
+    let get_f: extern "C" fn(*mut c_void) -> *mut c_void = unsafe { std::mem::transmute(api("hachimi_get_interceptor")?) };
+    let itc = get_f(instance_f());
+    if !itc.is_null() {
+        let _ = HOST_INTERCEPTOR.set(itc as usize);
+        Some(itc as usize)
+    } else {
+        None
+    }
+}
+
+/// 借宿主安装 hook —— 装之前先过 conflict guard。
+pub fn hook_guarded(orig: usize, hook: usize, symbol: Option<&str>) -> Result<usize, ()> {
+    match crate::guard::decide(orig, symbol) {
+        crate::guard::HookDecision::Allow(target) => {
+            let itc = interceptor().ok_or(())?;
+            let hook_f: InterceptorHookFn = unsafe {
+                std::mem::transmute(api("interceptor_hook").ok_or(())?)
+            };
+            let tramp = unsafe { hook_f(itc as *mut c_void, target as *mut c_void, hook as *mut c_void) };
+            if tramp.is_null() {
+                return Err(());
+            }
+            crate::guard::register_own_hook(orig, hook);
+            Ok(tramp as usize)
+        }
+        // AlreadyHooked / DeniedByHost —— 让路，不算错误
+        crate::guard::HookDecision::AlreadyHooked => Err(()),
+        crate::guard::HookDecision::DeniedByHost => {
+            log::warn!("chonggou: {symbol:?} 已被宿主占用，跳过");
+            Err(())
+        }
+        crate::guard::HookDecision::InvalidTarget => Err(()),
+    }
+}
+
+/// 取当前 trampoline（原函数），供 hook 内部链式调用。
+pub fn trampoline(hook_addr: usize) -> Option<usize> {
+    let itc = interceptor()?;
+    let f: GetTrampolineFn = unsafe { std::mem::transmute(api("interceptor_get_trampoline_addr")?) };
+    let t = unsafe { f(itc as *mut c_void, hook_addr as *mut c_void) };
+    if t.is_null() { None } else { Some(t as usize) }
+}
+
+pub fn resolve_symbol(name: &str) -> Option<usize> {
+    let f: ResolveSymbolFn = unsafe { std::mem::transmute(api("il2cpp_resolve_symbol")?) };
+    let c = CString::new(name).ok()?;
+    let p = unsafe { f(c.as_ptr()) };
+    if p.is_null() { None } else { Some(p as usize) }
+}
+
+pub fn get_method_addr(assembly: &str, ns: &str, class: &str, method: &str, args: i32) -> Option<usize> {
+    let img_f: GetImageFn = unsafe { std::mem::transmute(api("il2cpp_get_assembly_image")?) };
+    let cls_f: GetClassFn = unsafe { std::mem::transmute(api("il2cpp_get_class")?) };
+    let mth_f: GetMethodAddrFn = unsafe { std::mem::transmute(api("il2cpp_get_method_addr")?) };
+
+    let a = CString::new(assembly).ok()?;
+    let n = CString::new(ns).ok()?;
+    let c = CString::new(class).ok()?;
+    let m = CString::new(method).ok()?;
+
+    let image = unsafe { img_f(a.as_ptr()) };
+    if image.is_null() { return None; }
+    let klass = unsafe { cls_f(image, n.as_ptr(), c.as_ptr()) };
+    if klass.is_null() { return None; }
+    let addr = unsafe { mth_f(klass, m.as_ptr(), args) };
+    if addr.is_null() { None } else { Some(addr as usize) }
+}
+
+pub fn host_log(level: i32, target: &str, msg: &str) {
+    if let Some(f) = api("log") {
+        let f: LogFn = unsafe { std::mem::transmute(f) };
+        if let (Ok(t), Ok(m)) = (CString::new(target), CString::new(msg)) {
+            unsafe { f(level, t.as_ptr(), m.as_ptr()) };
+        }
+    }
+}
+
+pub fn cstr<'a>(p: *const c_char) -> &'a str {
+    if p.is_null() { return ""; }
+    unsafe { CStr::from_ptr(p).to_str().unwrap_or("") }
+}
