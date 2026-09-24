@@ -1,5 +1,8 @@
 //! 全域日志：每个可观察点都落一条 —— 环形缓冲（内存）+ logcat 镜像。
 //! 通过 HTTP /logs 端点可整段拉回（这是"改→测→读日志"闭环的取数口）。
+//!
+//! 防闪退纪律：锁一律 poison 恢复（`unwrap_or_else(|p| p.into_inner())`），
+//! 游戏进程里绝不 panic。
 
 use once_cell::sync::Lazy;
 use serde::Serialize;
@@ -32,7 +35,7 @@ pub fn record(level: &str, msg: &str) {
         msg: msg.to_owned(),
     };
     {
-        let mut q = RING.lock().unwrap();
+        let mut q = RING.lock().unwrap_or_else(|p| p.into_inner());
         q.push_back(entry);
         while q.len() > RING_CAP {
             q.pop_front();
@@ -48,14 +51,14 @@ pub fn record(level: &str, msg: &str) {
 
 /// 拉取最近 n 条（时间升序）。
 pub fn recent(n: usize) -> Vec<LogEntry> {
-    let q = RING.lock().unwrap();
+    let q = RING.lock().unwrap_or_else(|p| p.into_inner());
     let skip = q.len().saturating_sub(n);
     q.iter().skip(skip).cloned().collect()
 }
 
 /// 当前缓冲条数。
 pub fn len() -> usize {
-    RING.lock().unwrap().len()
+    RING.lock().unwrap_or_else(|p| p.into_inner()).len()
 }
 
 #[macro_export]
