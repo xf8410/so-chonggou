@@ -80,13 +80,13 @@ pub fn resolve_candidates() {
         }
     }
 
-    *RESOLVED.lock().unwrap() = lines;
+    *RESOLVED.lock().unwrap_or_else(|p| p.into_inner()) = lines;
     crate::chlog!(info, "3帧化取证表已刷新（/anim 端点可读）");
 }
 
 /// /anim 端点快照。
 pub fn snapshot_json() -> String {
-    let resolved = RESOLVED.lock().unwrap();
+    let resolved = RESOLVED.lock().unwrap_or_else(|p| p.into_inner());
     let cfg = crate::config::get();
     json!({
         "mode": cfg.anim_mode,
