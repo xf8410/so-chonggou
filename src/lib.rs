@@ -5,7 +5,7 @@
 //!    `libhachimi_chonggou.so` 后调用 `hachimi_init_v3`，本库借用宿主
 //!    Interceptor 安装 hook，不带第二套 hook 引擎。
 //! 2. **独立模式** —— 作为 `libmain.so` 注入（原库改名 `libmain_orig.so`），
-//!    自带 Dobby，仅在无宿主时触发。
+//!    **零 hook 引擎**（libil2cpp 就绪靠 maps 轮询），仅提供 HTTP/日志/配置。
 //!
 //! 初始化顺序（插件模式）：
 //! bind 宿主 API → 读配置（外部媒体目录优先 → 宿主目录 → 内存默认）
