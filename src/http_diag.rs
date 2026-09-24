@@ -2,8 +2,8 @@
 //!
 //! **端口协商（重要）**：hlpatch SO 已占用 127.0.0.1:18765。本服务启动时按
 //! 首选端口尝试 bind，被占自动顺延（18765→18766→…），并把实际端口写入
-//! `<data_dir>/chonggou_port.txt`，同时打日志 —— 所以两个 SO 可以共存，
-//! Agora 指哪个端口就读哪个 SO 的数据。
+//! 外部媒体目录 + 宿主数据目录（都 best-effort），同时打日志 —— 两个 SO
+//! 可以共存，Agora 指哪个端口就读哪个 SO 的数据。
 
 use once_cell::sync::Lazy;
 use std::io::{BufRead, BufReader, Write};
@@ -53,14 +53,17 @@ fn run(base_dir: Option<String>) {
 }
 
 fn write_port_file(base_dir: &Option<String>, port: u16) {
-    if let Some(path) = crate::config::port_file_path() {
-        match std::fs::write(&path, format!("{port}\n")) {
-            Ok(_) => crate::chlog!(info, "实际端口已写入 {}", path.display()),
-            Err(e) => crate::chlog!(warn, "端口文件写入失败({e}): {}", path.display()),
-        }
-    } else {
-        let _ = base_dir;
+    let _ = base_dir; // 路径统一从 config 取（含外部媒体目录）
+    let paths = crate::config::port_file_paths();
+    if paths.is_empty() {
         crate::chlog!(warn, "无数据目录，端口仅日志可见: {port}");
+        return;
+    }
+    for p in paths {
+        match std::fs::write(&p, format!("{port}\n")) {
+            Ok(_) => crate::chlog!(info, "端口已写入 {}", p.display()),
+            Err(e) => crate::chlog!(warn, "端口文件写入失败({e}): {}", p.display()),
+        }
     }
 }
 
@@ -149,7 +152,10 @@ fn route_response(route: &str, query: Option<String>) -> (&'static str, String) 
             "200 OK",
             serde_json::json!({
                 "config": crate::config::get(),
-                "path": crate::config::config_path().map(|p| p.display().to_string()),
+                "paths": {
+                    "external": crate::config::external_dir(),
+                    "host": crate::config::host_config_path().map(|p| p.display().to_string()),
+                }
             })
             .to_string(),
         ),
