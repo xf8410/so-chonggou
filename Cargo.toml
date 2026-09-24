@@ -1,0 +1,25 @@
+[package]
+name = "hachimi_chonggou"
+version = "0.1.0"
+edition = "2021"
+
+# 产物名 libhachimi_chonggou.so —— 命中宿主自动扫描前缀 libhachimi_
+[lib]
+name = "hachimi_chonggou"
+crate-type = ["cdylib"]
+
+[profile.release]
+opt-level = 3
+strip = true
+lto = "fat"
+codegen-units = 1
+
+[dependencies]
+log = "0.4"
+once_cell = "1.19"
+jni = "0.21.1"
+android_logger = "0.15.1"
+
+[target.'cfg(target_os = "android")'.dependencies]
+# 仅独立模式需要；插件模式下绝不使用（避免第二套 inline hook 引擎）
+dobby-rs = "0.1"
