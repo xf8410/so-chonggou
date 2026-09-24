@@ -40,9 +40,14 @@ pub extern "C" fn JNI_OnLoad(vm: jni::JavaVM, reserved: *mut c_void) -> jni::sys
             let vm_ptr = vm.get_java_vm_pointer();
             let _ = JAVA_VM.set(vm);
             install_standalone_hooks();
-            // JavaVM 已被 move 进 OnceCell，照 Hachimi 的写法从 raw 重建一份给原函数
-            let vm_for_orig = jni::JavaVM::from_raw(vm_ptr).unwrap();
-            return orig(vm_for_orig, reserved);
+            // JavaVM 已被 move 进 OnceCell，从 raw 重建一份给原函数
+            return match jni::JavaVM::from_raw(vm_ptr) {
+                Ok(vm_for_orig) => orig(vm_for_orig, reserved),
+                Err(e) => {
+                    chlog!(error, "standalone: JavaVM::from_raw 失败({e:?})，跳过原 JNI_OnLoad");
+                    -1
+                }
+            };
         }
     }
     chlog!(error, "libmain_orig.so not found — 该 SO 需配合重打包（原库改名 libmain_orig.so）");
