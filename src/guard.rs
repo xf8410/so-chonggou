@@ -1,15 +1,16 @@
 //! 冲突防护层：denylist + prologue 探测
 //!
 //! 防 hook 冲突的两道防线：
-//! 1. **静态 denylist**：宿主 Hachimi-Edge 已占用的 hook 点（linker do_dlopen /
+//! 1. **静态 denylist**：宿主已占用的 hook 点（linker do_dlopen /
 //!    libc::dlopen / JNINativeInterface::RegisterNatives）。命中即拒绝安装。
+//!    IL2CPP 类级清单在 src/denylist.rs（宿主 150+ 个 hook 类全量收录）。
 //! 2. **动态 prologue 探测**：任何 inline hook 引擎（Dobby 等）都会把目标函数
 //!    首指令改写为跳转。装 hook 前读首指令，若已是跳转则说明**无论谁**已经
 //!    hook 了该函数，跳过安装，绝不二次打补丁。
 
 use std::sync::Mutex;
 
-/// 宿主已占用的 hook 点（按符号名）。
+/// 宿主已占用的进程级 hook 点（按符号名）。
 pub const HOST_DENY_SYMBOLS: &[(&str, &str)] = &[
     // (module, symbol) —— 见 Hachimi-Edge src/android/hook.rs
     ("linker64", "__dl__Z9do_dlopenPKciPK17android_dlextinfoPKv"),
@@ -67,7 +68,12 @@ pub fn decide(orig_addr: usize, symbol: Option<&str>) -> HookDecision {
         }
     }
 
-    if OWN_HOOKS.lock().unwrap().iter().any(|(o, _)| *o == orig_addr) {
+    if OWN_HOOKS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .iter()
+        .any(|(o, _)| *o == orig_addr)
+    {
         return HookDecision::AlreadyHooked;
     }
 
@@ -80,12 +86,15 @@ pub fn decide(orig_addr: usize, symbol: Option<&str>) -> HookDecision {
 
 /// 登记成功安装的 hook。
 pub fn register_own_hook(orig_addr: usize, hook_addr: usize) {
-    OWN_HOOKS.lock().unwrap().push((orig_addr, hook_addr));
+    OWN_HOOKS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .push((orig_addr, hook_addr));
 }
 
 /// 我方 hook 注册表快照（供 /hooks 诊断端点）。
 pub fn own_hooks() -> Vec<(usize, usize)> {
-    OWN_HOOKS.lock().unwrap().clone()
+    OWN_HOOKS.lock().unwrap_or_else(|p| p.into_inner()).clone()
 }
 
 #[cfg(test)]
