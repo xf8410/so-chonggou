@@ -26,7 +26,7 @@ fn api(name: &str) -> Option<usize> {
 }
 
 /// 供 crate 内取宿主 API 函数指针。
-pub(crate) fn api_lookup(name: &str) -> Option<usize> {
+pub fn api_lookup(name: &str) -> Option<usize> {
     api(name)
 }
 
@@ -36,8 +36,8 @@ pub fn bind(get_api: GetApiFn) {
 }
 
 fn interceptor() -> Option<usize> {
-    if let Some(v) = *HOST_INTERCEPTOR.get() {
-        return Some(v);
+    if let Some(v) = HOST_INTERCEPTOR.get() {
+        return Some(*v);
     }
     // hachimi_instance() -> hachimi_get_interceptor(instance)
     let instance_f: extern "C" fn() -> *mut c_void = unsafe { std::mem::transmute(api("hachimi_instance")?) };
@@ -67,12 +67,7 @@ pub fn hook_guarded(orig: usize, hook: usize, symbol: Option<&str>) -> Result<us
             crate::guard::register_own_hook(orig, hook);
             Ok(tramp as usize)
         }
-        crate::guard::HookDecision::AlreadyHooked => Err(()),
-        crate::guard::HookDecision::DeniedByHost => {
-            log::warn!("chonggou: {symbol:?} 已被宿主占用，跳过");
-            Err(())
-        }
-        crate::guard::HookDecision::InvalidTarget => Err(()),
+        _ => Err(()),
     }
 }
 
@@ -91,20 +86,37 @@ pub fn resolve_symbol(name: &str) -> Option<usize> {
     if p.is_null() { None } else { Some(p as usize) }
 }
 
-pub fn get_method_addr(assembly: &str, ns: &str, class: &str, method: &str, args: i32) -> Option<usize> {
-    let img_f: GetImageFn = unsafe { std::mem::transmute(api("il2cpp_get_assembly_image")?) };
-    let cls_f: GetClassFn = unsafe { std::mem::transmute(api("il2cpp_get_class")?) };
-    let mth_f: GetMethodAddrFn = unsafe { std::mem::transmute(api("il2cpp_get_method_addr")?) };
-
-    let a = CString::new(assembly).ok()?;
-    let n = CString::new(ns).ok()?;
-    let c = CString::new(class).ok()?;
-    let m = CString::new(method).ok()?;
-
+fn get_class_raw(assembly: &str, ns: &str, class: &str) -> *mut c_void {
+    let img_f: GetImageFn = match unsafe { std::mem::transmute(api("il2cpp_get_assembly_image")?) } {
+        f => f,
+    };
+    let cls_f: GetClassFn = match unsafe { std::mem::transmute(api("il2cpp_get_class")?) } {
+        f => f,
+    };
+    let (a, n, c) = match (CString::new(assembly), CString::new(ns), CString::new(class)) {
+        (Ok(a), Ok(n), Ok(c)) => (a, n, c),
+        _ => return std::ptr::null_mut(),
+    };
     let image = unsafe { img_f(a.as_ptr()) };
-    if image.is_null() { return None; }
-    let klass = unsafe { cls_f(image, n.as_ptr(), c.as_ptr()) };
-    if klass.is_null() { return None; }
+    if image.is_null() {
+        return std::ptr::null_mut();
+    }
+    unsafe { cls_f(image, n.as_ptr(), c.as_ptr()) }
+}
+
+/// 类是否存在（探测用，不做任何调用）。
+pub fn class_exists(assembly: &str, ns: &str, class: &str) -> bool {
+    !get_class_raw(assembly, ns, class).is_null()
+}
+
+/// 解析方法地址（只查址，不调用 —— 探测安全）。
+pub fn get_method_addr(assembly: &str, ns: &str, class: &str, method: &str, args: i32) -> Option<usize> {
+    let mth_f: GetMethodAddrFn = unsafe { std::mem::transmute(api("il2cpp_get_method_addr")?) };
+    let klass = get_class_raw(assembly, ns, class);
+    if klass.is_null() {
+        return None;
+    }
+    let m = CString::new(method).ok()?;
     let addr = unsafe { mth_f(klass, m.as_ptr(), args) };
     if addr.is_null() { None } else { Some(addr as usize) }
 }
