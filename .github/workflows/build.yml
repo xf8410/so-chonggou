@@ -29,25 +29,16 @@ jobs:
       - name: Install cargo-ndk
         run: cargo install cargo-ndk
 
-      - name: Locate / install NDK (explicit, fail loud)
+      - name: Locate preinstalled NDK
         run: |
-          echo "ANDROID_HOME=$ANDROID_HOME"
-          echo "-- preinstalled NDK list --"
-          ls "$ANDROID_HOME/ndk" 2>/dev/null || echo "(none)"
-          if [ -z "$(ls "$ANDROID_HOME/ndk" 2>/dev/null)" ]; then
-            SDKM=$(find "$ANDROID_HOME" -name sdkmanager -type f 2>/dev/null | head -n1)
-            echo "sdkmanager: $SDKM"
-            if [ -z "$SDKM" ]; then echo "FATAL: no sdkmanager found"; exit 1; fi
-            yes | "$SDKM" --licenses >/dev/null 2>&1 || true
-            "$SDKM" --install "ndk;27.2.12479018"
-          fi
           NDK_DIR=$(ls -d "$ANDROID_HOME"/ndk/* 2>/dev/null | head -n1)
-          if [ -z "$NDK_DIR" ]; then echo "FATAL: no NDK found after install"; exit 1; fi
+          if [ -z "$NDK_DIR" ]; then echo "FATAL: no preinstalled NDK under $ANDROID_HOME/ndk"; exit 1; fi
           echo "Using NDK: $NDK_DIR"
           echo "ANDROID_NDK_HOME=$NDK_DIR" >> "$GITHUB_ENV"
 
       - name: Build (arm64-v8a)
-        run: cargo ndk -t arm64-v8a -p 21 -o jniLibs build --release
+        # 注意：cargo-ndk 4.x 的 -p 是 --package，不是 platform；platform 走默认(21)
+        run: cargo ndk -t arm64-v8a -o jniLibs build --release
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
