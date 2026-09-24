@@ -5,7 +5,17 @@ on:
   workflow_dispatch:
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run guard unit tests
+        run: cargo test
+
   build:
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -19,17 +29,17 @@ jobs:
       - name: Install cargo-ndk
         run: cargo install cargo-ndk
 
-      - name: Setup Android NDK
+      - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Test (host)
-        run: cargo test
+      - name: Install NDK
+        run: sdkmanager "ndk;27.0.12077973"
 
       - name: Build
-        run: cargo ndk -t arm64-v8a build --release
+        run: cargo ndk -t arm64-v8a -p 21 -o jniLibs build --release
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: libhachimi_chonggou.so
-          path: target/aarch64-linux-android/release/libhachimi_chonggou.so
+          path: jniLibs/arm64-v8a/libhachimi_chonggou.so
