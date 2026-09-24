@@ -6,10 +6,20 @@
 //!    Interceptor 安装 hook，不带第二套 hook 引擎。
 //! 2. **独立模式** —— 作为 `libmain.so` 注入（原库改名 `libmain_orig.so`），
 //!    自带 Dobby，仅在无宿主时触发。
+//!
+//! 初始化顺序（插件模式）：
+//! bind 宿主 API → 读配置（chonggou.json）→ 起诊断 HTTP（18765，被占顺延）
+//! → 注册游戏初始化回调 → install_all（全部走 guard + 全量日志）
 
+#[macro_use]
+pub mod logging;
+
+pub mod config;
 pub mod guard;
 pub mod host;
 pub mod hooks;
+pub mod http_diag;
+pub mod training_anim;
 
 #[cfg(target_os = "android")]
 pub mod standalone;
@@ -31,12 +41,20 @@ pub extern "C" fn hachimi_init_v3(get_api: GetApiFn, version: i32) -> i32 {
     );
 
     if version < 2 {
-        log::error!("{PLUGIN_NAME}: host api version {version} too old");
+        chlog!(error, "{PLUGIN_NAME}: host api version {version} too old");
         return 0;
     }
 
-    log::info!("{PLUGIN_NAME}: attached in plugin mode (host api v{version})");
+    chlog!(
+        info,
+        "{PLUGIN_NAME} v{}: plugin mode attached (host api v{version})",
+        env!("CARGO_PKG_VERSION")
+    );
     host::bind(get_api);
+
+    let base = host_base_dir();
+    config::init(base.clone());
+    http_diag::start(base);
 
     // 注册「游戏初始化完成」回调，再装 hook（此时 il2cpp 元数据已就绪）
     if let Some(f) = host::api_lookup("hachimi_register_on_game_initialized") {
@@ -47,20 +65,32 @@ pub extern "C" fn hachimi_init_v3(get_api: GetApiFn, version: i32) -> i32 {
         }
     }
     // 宿主不支持该回调时直接装
-    hooks::install_all();
+    on_game_initialized(std::ptr::null_mut());
     1
 }
 
 unsafe extern "C" fn on_game_initialized(_ud: *mut c_void) {
-    log::info!("{PLUGIN_NAME}: game initialized, installing guarded hooks");
+    chlog!(info, "游戏初始化完成，安装 guarded hooks");
     hooks::install_all();
     host::host_log(3, "chonggou", "loaded (plugin mode, conflict guard active)");
+}
+
+/// 宿主数据目录（Hachimi data dir，用户可通过文件管理器改配置）。
+fn host_base_dir() -> Option<String> {
+    let f = host::api_lookup("hachimi_get_base_dir")?;
+    type BaseDirFn = unsafe extern "C" fn() -> *const std::os::raw::c_char;
+    let f: BaseDirFn = unsafe { std::mem::transmute(f) };
+    let p = unsafe { f() };
+    if p.is_null() {
+        return None;
+    }
+    Some(host::cstr(p).to_owned())
 }
 
 /// 兼容 V2 宿主的旧入口 —— 本库要求 V3 get_api，V2 拒绝。
 #[no_mangle]
 pub extern "C" fn hachimi_init(_vtable: *const std::os::raw::c_char, _version: i32) -> i32 {
-    log::warn!("{PLUGIN_NAME}: V2 init rejected, requires hachimi_init_v3");
+    chlog!(warn, "{PLUGIN_NAME}: V2 init rejected, requires hachimi_init_v3");
     0
 }
 
