@@ -25,18 +25,15 @@ fn api(name: &str) -> Option<usize> {
     if ptr.is_null() { None } else { Some(ptr as usize) }
 }
 
-/// 由 hachimi_init_v3 注入。
-pub fn bind(get_api: GetApiFn) {
-    let _ = GET_API.set(get_api);
-    if let Some(h) = api("hachimi_get_interceptor") {
-        let f: extern "C" fn(*mut c_void) -> *mut c_void = unsafe { std::mem::transmute(h) };
-        let type GetInstance = ();
-        let _ = type_get_instance_marker(f);
-    }
+/// 供 crate 内取宿主 API 函数指针。
+pub(crate) fn api_lookup(name: &str) -> Option<usize> {
+    api(name)
 }
 
-// 占位以保持类型清晰（见 bind_interceptor）
-fn type_get_instance_marker(_f: extern "C" fn(*mut c_void) -> *mut c_void) {}
+/// 由 hachimi_init_v3 注入 get_api。
+pub fn bind(get_api: GetApiFn) {
+    let _ = GET_API.set(get_api);
+}
 
 fn interceptor() -> Option<usize> {
     if let Some(v) = *HOST_INTERCEPTOR.get() {
@@ -55,6 +52,7 @@ fn interceptor() -> Option<usize> {
 }
 
 /// 借宿主安装 hook —— 装之前先过 conflict guard。
+/// Err(()) = 被防护层拒绝（冲突让路），属正常控制流。
 pub fn hook_guarded(orig: usize, hook: usize, symbol: Option<&str>) -> Result<usize, ()> {
     match crate::guard::decide(orig, symbol) {
         crate::guard::HookDecision::Allow(target) => {
@@ -69,7 +67,6 @@ pub fn hook_guarded(orig: usize, hook: usize, symbol: Option<&str>) -> Result<us
             crate::guard::register_own_hook(orig, hook);
             Ok(tramp as usize)
         }
-        // AlreadyHooked / DeniedByHost —— 让路，不算错误
         crate::guard::HookDecision::AlreadyHooked => Err(()),
         crate::guard::HookDecision::DeniedByHost => {
             log::warn!("chonggou: {symbol:?} 已被宿主占用，跳过");
