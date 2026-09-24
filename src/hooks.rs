@@ -7,7 +7,7 @@
 
 use std::os::raw::c_void;
 
-use crate::{chlog, host};
+use crate::host;
 
 // ============ UnityEngine.CoreModule / Application ============
 
