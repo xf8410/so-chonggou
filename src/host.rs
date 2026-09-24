@@ -87,19 +87,35 @@ pub fn resolve_symbol(name: &str) -> Option<usize> {
 }
 
 fn get_class_raw(assembly: &str, ns: &str, class: &str) -> *mut c_void {
-    let img_f: GetImageFn = match unsafe { std::mem::transmute(api("il2cpp_get_assembly_image")?) } {
-        f => f,
+    let null = std::ptr::null_mut();
+
+    let img_api = match api("il2cpp_get_assembly_image") {
+        Some(v) => v,
+        None => return null,
     };
-    let cls_f: GetClassFn = match unsafe { std::mem::transmute(api("il2cpp_get_class")?) } {
-        f => f,
+    let cls_api = match api("il2cpp_get_class") {
+        Some(v) => v,
+        None => return null,
     };
-    let (a, n, c) = match (CString::new(assembly), CString::new(ns), CString::new(class)) {
-        (Ok(a), Ok(n), Ok(c)) => (a, n, c),
-        _ => return std::ptr::null_mut(),
+    let img_f: GetImageFn = unsafe { std::mem::transmute(img_api) };
+    let cls_f: GetClassFn = unsafe { std::mem::transmute(cls_api) };
+
+    let a = match CString::new(assembly) {
+        Ok(v) => v,
+        Err(_) => return null,
     };
+    let n = match CString::new(ns) {
+        Ok(v) => v,
+        Err(_) => return null,
+    };
+    let c = match CString::new(class) {
+        Ok(v) => v,
+        Err(_) => return null,
+    };
+
     let image = unsafe { img_f(a.as_ptr()) };
     if image.is_null() {
-        return std::ptr::null_mut();
+        return null;
     }
     unsafe { cls_f(image, n.as_ptr(), c.as_ptr()) }
 }
@@ -111,7 +127,8 @@ pub fn class_exists(assembly: &str, ns: &str, class: &str) -> bool {
 
 /// 解析方法地址（只查址，不调用 —— 探测安全）。
 pub fn get_method_addr(assembly: &str, ns: &str, class: &str, method: &str, args: i32) -> Option<usize> {
-    let mth_f: GetMethodAddrFn = unsafe { std::mem::transmute(api("il2cpp_get_method_addr")?) };
+    let mth_api = api("il2cpp_get_method_addr")?;
+    let mth_f: GetMethodAddrFn = unsafe { std::mem::transmute(mth_api) };
     let klass = get_class_raw(assembly, ns, class);
     if klass.is_null() {
         return None;
