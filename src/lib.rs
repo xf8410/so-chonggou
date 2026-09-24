@@ -65,7 +65,7 @@ pub extern "C" fn hachimi_init_v3(get_api: GetApiFn, version: i32) -> i32 {
         }
     }
     // 宿主不支持该回调时直接装
-    on_game_initialized(std::ptr::null_mut());
+    unsafe { on_game_initialized(std::ptr::null_mut()) };
     1
 }
 
