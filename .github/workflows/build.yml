@@ -1,0 +1,47 @@
+name: Build SO
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run unit tests (guard / logging / config / denylist)
+        run: cargo test
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk
+
+      - name: Locate preinstalled NDK
+        run: |
+          NDK_DIR=$(ls -d "$ANDROID_HOME"/ndk/* 2>/dev/null | head -n1)
+          if [ -z "$NDK_DIR" ]; then echo "FATAL: no preinstalled NDK under $ANDROID_HOME/ndk"; exit 1; fi
+          echo "Using NDK: $NDK_DIR"
+          echo "ANDROID_NDK_HOME=$NDK_DIR" >> "$GITHUB_ENV"
+
+      - name: Build (arm64-v8a)
+        # 注意：cargo-ndk 4.x 的 -p 是 --package，不是 platform；platform 走默认(21)
+        run: cargo ndk -t arm64-v8a -o jniLibs build --release
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: libhachimi_chonggou.so
+          path: jniLibs/arm64-v8a/libhachimi_chonggou.so
