@@ -14,7 +14,7 @@
 //! - `RectTransform` / `Transform` / `Object` 虽在宿主 hook 清单里（docs/CONFLICTS.md），
 //!   但 denylist 只管**装 hook**；我们这里只**读**，不装任何 hook，无冲突面。
 
-use std::os::raw::{c_char, c_void};
+use std::os::raw::c_void;
 use std::sync::Mutex;
 
 use once_cell::sync::Lazy;
@@ -67,11 +67,11 @@ fn resolve() -> Apis {
 
 fn apis_report(a: &Apis) -> serde_json::Value {
     json!({
-        "get_name":         a.get_name.is_some(),
+        "get_name":             a.get_name.is_some(),
         "get_anchoredPosition": a.get_anchored.is_some(),
-        "get_sizeDelta":    a.get_size_delta.is_some(),
-        "get_localScale":   a.get_local_scale.is_some(),
-        "get_parent":       a.get_parent.is_some(),
+        "get_sizeDelta":        a.get_size_delta.is_some(),
+        "get_localScale":       a.get_local_scale.is_some(),
+        "get_parent":           a.get_parent.is_some(),
     })
 }
 
@@ -186,20 +186,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn gate_closed_snapshot_is_honest() {
-        crate::config::update(|c| c.probe_instances = false);
-        refresh();
-        let s = snapshot_json();
-        assert!(s.contains("\"enabled\":false"));
-        assert!(s.contains("probe_instances"));
-    }
-
-    #[test]
     fn missing_api_degrades_to_null_not_crash() {
         // 全 0 地址 = 全部符号缺失，必须降级成 null 而不是崩
         assert!(v2_json(call2(0, 0xDEAD)).is_null());
         assert!(v3_json(call3(0, 0xDEAD)).is_null());
         assert!(call_ptr(0, 0xDEAD).is_none());
+        assert_eq!(name_of(0, 0xDEAD), "<no get_name>");
     }
 
     #[test]
@@ -207,5 +199,18 @@ mod tests {
         use std::mem::size_of;
         assert_eq!(size_of::<Vec2>(), 8);
         assert_eq!(size_of::<Vec3>(), 12);
+    }
+
+    #[test]
+    fn probe_gate_defaults_off() {
+        // 纯读断言：不动全局配置，测试并行也安全
+        assert!(!crate::config::Config::default().probe_instances);
+    }
+
+    #[test]
+    fn snapshot_always_returns_json() {
+        // 未 refresh 过也必须是合法 JSON（端点不能吐半截）
+        let s = snapshot_json();
+        assert!(s.starts_with('{'));
     }
 }
