@@ -11,6 +11,10 @@
 //! bind 宿主 API → 读配置（外部媒体目录优先 → 宿主目录 → 内存默认）
 //! → 起诊断 HTTP（18765，被占顺延）→ 注册游戏初始化回调
 //! → install_all（denylist → prologue → 全量日志）
+//!
+//! v0.3.0：新增 `/uitree` 端点与动画提速落刀（`ui_probe` + `training_anim::speed`）。
+//! 两者都受 `config::probe_instances` 总闸保护，**默认关** —— 关着时行为与 0.2.0
+//! 完全一致，不碰任何游戏内存。
 
 #[macro_use]
 pub mod logging;
@@ -22,6 +26,7 @@ pub mod host;
 pub mod hooks;
 pub mod http_diag;
 pub mod training_anim;
+pub mod ui_probe;
 
 #[cfg(target_os = "android")]
 pub mod standalone;
