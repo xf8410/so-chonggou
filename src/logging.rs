@@ -114,17 +114,23 @@ mod tests {
         assert!(last5.iter().any(|e| e.msg == "marker-x"));
     }
 
+    /// 毒化锁真的造一个出来（子线程持锁时 panic），验证 record/recent 仍可用 ——
+    /// 这条正是「游戏进程里绝不 panic」纪律的回归钉。
+    ///
+    /// ⚠️ 曾经的写法 `let _ = RING.lock();` 是 rustc 的 **deny(let_underscore_lock)**
+    /// 硬错误，而且它根本没毒化锁（正常加解锁不会 poison）—— 名字骗人、什么也没测。
+    /// 必须让持锁线程真的 panic，Mutex 才会被标 poisoned。
     #[test]
-    fn poison_lock_still_usable() {
-        // 防闪退纪律的回归钉：锁被毒化后仍能读写，绝不 panic
-        let poisoned = {
-            let g = RING.lock();
-            drop(g);
-            let _ = RING.lock();
-            true
-        };
-        assert!(poisoned);
-        record("I", "after-poison-check");
-        assert!(recent(RING_CAP).iter().any(|e| e.msg == "after-poison-check"));
+    fn survives_poisoned_lock() {
+        let p = std::thread::spawn(|| {
+            let _g = RING.lock();
+            panic!("故意 panic 以毒化锁");
+        });
+        assert!(p.join().is_err(), "子线程应当 panic");
+
+        // 现在 RING 已是 poisoned —— record/recent 仍必须正常工作（内部走 into_inner）
+        record("I", "after-poison");
+        assert!(recent(RING_CAP).iter().any(|e| e.msg == "after-poison"));
+        assert!(len() > 0);
     }
 }
