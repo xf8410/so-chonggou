@@ -21,12 +21,6 @@ static mut ORIG_PLAY_1: usize = 0;
 type Play0 = unsafe extern "C" fn(this: *mut c_void);
 type Play1 = unsafe extern "C" fn(this: *mut c_void, asset: *mut c_void);
 
-/// 函数项取地址：先转 `*const ()` 再转 usize。
-/// 直接 `fn as usize` 会触发 rustc 1.98 的 `function_casts_as_integer` 警告。
-fn addr_of(f: unsafe extern "C" fn()) -> usize {
-    f as *const () as usize
-}
-
 pub unsafe extern "C" fn hook_play_0(this: *mut c_void) {
     chlog!(info, "PlayableDirector.Play(this={:p})", this);
     crate::training_anim::note_play(this as usize, 0);
