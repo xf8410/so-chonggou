@@ -94,8 +94,11 @@ pub fn init(base_dir: Option<String>) {
         }
     }
 
+    // 先记闸门状态再 move —— cfg 下面要交给全局 CONFIG，不能再用
+    let gate_on = cfg.probe_instances;
+    *CONFIG.write().unwrap_or_else(|p| p.into_inner()) = cfg;
+
     if !source.is_empty() {
-        *CONFIG.write().unwrap_or_else(|p| p.into_inner()) = cfg;
         crate::chlog!(info, "配置已加载（来源 {source}）");
     } else {
         // 首次运行：默认配置尽量落一份（外部优先，宿主兜底），失败也不影响运行
@@ -105,7 +108,7 @@ pub fn init(base_dir: Option<String>) {
         }
     }
 
-    if !cfg.probe_instances {
+    if !gate_on {
         crate::chlog!(info, "实例枚举关闭（probe_instances=false）：/uitree 与动画提速不生效");
     } else {
         crate::chlog!(warn, "实例枚举已开启（probe_instances=true）：所有解析失败均降级为空，不崩");
@@ -121,6 +124,7 @@ pub fn probe_instances() -> bool {
     get().probe_instances
 }
 
+/// 改配置（字段范围校验在调用方做，这里只负责加锁与落盘）。
 pub fn update(f: impl FnOnce(&mut Config)) {
     {
         let mut c = CONFIG.write().unwrap_or_else(|p| p.into_inner());
