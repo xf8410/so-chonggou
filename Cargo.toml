@@ -1,6 +1,6 @@
 [package]
 name = "hachimi_chonggou"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 
 # 产物名 libhachimi_chonggou.so —— 命中宿主自动扫描前缀 libhachimi_

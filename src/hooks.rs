@@ -24,14 +24,14 @@ type Play1 = unsafe extern "C" fn(this: *mut c_void, asset: *mut c_void);
 pub unsafe extern "C" fn hook_play_0(this: *mut c_void) {
     chlog!(info, "PlayableDirector.Play(this={:p})", this);
     crate::training_anim::note_play(this as usize, 0);
-    let orig: Play0 = std::mem::transmute(orig_for(hook_play_0 as usize, ORIG_PLAY_0));
+    let orig: Play0 = std::mem::transmute(orig_for(hook_play_0 as *const () as usize, ORIG_PLAY_0));
     orig(this);
 }
 
 pub unsafe extern "C" fn hook_play_1(this: *mut c_void, asset: *mut c_void) {
     chlog!(info, "PlayableDirector.Play(asset, this={:p})", this);
     crate::training_anim::note_play(this as usize, 1);
-    let orig: Play1 = std::mem::transmute(orig_for(hook_play_1 as usize, ORIG_PLAY_1));
+    let orig: Play1 = std::mem::transmute(orig_for(hook_play_1 as *const () as usize, ORIG_PLAY_1));
     orig(this, asset);
 }
 
@@ -53,7 +53,7 @@ pub fn install_all() {
             "PlayableDirector",
             "Play",
             0,
-            hook_play_0 as usize,
+            hook_play_0 as *const () as usize,
         ),
         (
             None,
@@ -62,7 +62,7 @@ pub fn install_all() {
             "PlayableDirector",
             "Play",
             1,
-            hook_play_1 as usize,
+            hook_play_1 as *const () as usize,
         ),
     ];
 
@@ -81,7 +81,7 @@ pub fn install_all() {
             Ok(tramp) => {
                 unsafe {
                     match hook_fn {
-                        x if x == hook_play_0 as usize => ORIG_PLAY_0 = tramp,
+                        x if x == hook_play_0 as *const () as usize => ORIG_PLAY_0 = tramp,
                         _ => ORIG_PLAY_1 = tramp,
                     }
                 }

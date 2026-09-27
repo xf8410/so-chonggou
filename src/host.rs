@@ -1,5 +1,9 @@
 //! 宿主 API 层：插件模式下所有 il2cpp 访问与 hook 都借道宿主，
 //! 本 SO **不引入第二套 inline hook 引擎**，从根源上避免冲突。
+//!
+//! v0.3.0 追加：il2cpp 运行时直读（`find_instances` / Il2CppArray / Il2CppString）。
+//! 这些是**布局假设**，全部受 `config::probe_instances` 总闸保护（默认关），
+//! 且任一环节解析不到就返回空 —— 逐级降级，绝不崩、绝不猜。
 
 use std::ffi::{c_char, c_void, CStr, CString};
 use once_cell::sync::OnceCell;
@@ -120,6 +124,11 @@ fn get_class_raw(assembly: &str, ns: &str, class: &str) -> *mut c_void {
     unsafe { cls_f(image, n.as_ptr(), c.as_ptr()) }
 }
 
+/// 类指针（供实例枚举用）。
+pub fn get_class_ptr(assembly: &str, ns: &str, class: &str) -> usize {
+    get_class_raw(assembly, ns, class) as usize
+}
+
 /// 类是否存在（探测用，不做任何调用）。
 pub fn class_exists(assembly: &str, ns: &str, class: &str) -> bool {
     !get_class_raw(assembly, ns, class).is_null()
@@ -150,4 +159,146 @@ pub fn host_log(level: i32, target: &str, msg: &str) {
 pub fn cstr<'a>(p: *const c_char) -> &'a str {
     if p.is_null() { return ""; }
     unsafe { CStr::from_ptr(p).to_str().unwrap_or("") }
+}
+
+// ===================== v0.3.0：il2cpp 运行时直读 =====================
+//
+// 全部受 `config::probe_instances` 总闸保护（默认关）。任一符号解析不到 →
+// 返回空 Vec / None，调用方照常降级。这是「先量后动」纪律的延续：我们
+// 宁可给空表，也不拿猜来的 ABI 去调游戏函数。
+
+/// Il2CppObject 头 16 字节（klass + monitor）。
+const OBJ_HDR: usize = 16;
+/// Il2CppArray：obj(16) + bounds*(8) + max_length(8) → vector 从 32 开始。
+const ARRAY_VECTOR_OFF: usize = 32;
+/// Il2CppString：obj(16) + length(4) → chars 从 20 开始。
+const STR_LEN_OFF: usize = 16;
+const STR_CHARS_OFF: usize = 20;
+
+type ClassGetTypeFn = unsafe extern "C" fn(class: *mut c_void) -> *mut c_void;
+type FindObjectsOfTypeFn = unsafe extern "C" fn(ty: *mut c_void, include_inactive: bool) -> *mut c_void;
+
+/// 托管数组长度（越界/空指针一律 0）。
+pub fn array_len(arr: usize) -> usize {
+    if arr == 0 {
+        return 0;
+    }
+    unsafe { *((arr as *const u8).add(OBJ_HDR + 8) as *const usize) }
+}
+
+/// 托管数组第 i 个元素（越界返回 0）。
+pub fn array_get(arr: usize, i: usize) -> usize {
+    if arr == 0 {
+        return 0;
+    }
+    let len = array_len(arr);
+    if i >= len {
+        return 0;
+    }
+    unsafe { *((arr as *const u8).add(ARRAY_VECTOR_OFF + i * 8) as *const usize) }
+}
+
+/// 读 Il2CppString 为 Rust String（有界 64 字符，遇 NUL 提前断）。
+pub fn read_managed_string(p: usize) -> String {
+    if p == 0 {
+        return String::new();
+    }
+    unsafe {
+        let len_i32 = *((p as *const u8).add(STR_LEN_OFF) as *const i32);
+        if len_i32 <= 0 {
+            return String::new();
+        }
+        let n = (len_i32 as usize).min(64);
+        let chars = (p as *const u8).add(STR_CHARS_OFF) as *const u16;
+        let mut s = String::with_capacity(n);
+        for i in 0..n {
+            let c = *chars.add(i);
+            if c == 0 {
+                break;
+            }
+            if let Some(ch) = char::from_u32(c as u32) {
+                s.push(ch);
+            }
+        }
+        s
+    }
+}
+
+/// 枚举场景内某类的全部实例。返回对象指针列表。
+///
+/// 逐级降级链（任一步失败即返回空，绝不 panic）：
+/// 1. 总闸 `probe_instances` 关 → 空
+/// 2. 类解析不到 → 空
+/// 3. `il2cpp_class_get_type` 符号解析不到 → 空
+/// 4. `Object.FindObjectsOfType(Type,bool)` 解析不到 → 空
+/// 5. 返回数组为空/不可读 → 空
+pub fn find_instances(assembly: &str, ns: &str, class: &str) -> Vec<usize> {
+    let mut out: Vec<usize> = Vec::new();
+    if !crate::config::probe_instances() {
+        return out;
+    }
+    let klass = get_class_ptr(assembly, ns, class);
+    if klass == 0 {
+        chlog!(warn, "find_instances: 类缺失 {ns}.{class}");
+        return out;
+    }
+    let Some(sym) = resolve_symbol("il2cpp_class_get_type") else {
+        chlog!(warn, "find_instances: 符号缺失 il2cpp_class_get_type");
+        return out;
+    };
+    let type_f: ClassGetTypeFn = unsafe { std::mem::transmute(sym) };
+    let ty = unsafe { type_f(klass as *mut c_void) };
+    if ty.is_null() {
+        chlog!(warn, "find_instances: {class} 取 System.Type 失败");
+        return out;
+    }
+    let Some(m) = get_method_addr("UnityEngine.CoreModule", "UnityEngine", "Object", "FindObjectsOfType", 2)
+    else {
+        chlog!(warn, "find_instances: Object.FindObjectsOfType/2 解析失败");
+        return out;
+    };
+    let find_f: FindObjectsOfTypeFn = unsafe { std::mem::transmute(m) };
+    let arr = unsafe { find_f(ty, true) } as usize;
+    if arr == 0 {
+        return out;
+    }
+    let n = array_len(arr);
+    chlog!(info, "find_instances: {class} 命中 {n} 个实例");
+    let cap = n.min(1024);
+    for i in 0..cap {
+        let o = array_get(arr, i);
+        if o != 0 {
+            out.push(o);
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn null_guarded_reads() {
+        assert_eq!(array_len(0), 0);
+        assert_eq!(array_get(0, 3), 0);
+        assert_eq!(read_managed_string(0), "");
+    }
+
+    #[test]
+    fn gate_closed_returns_empty() {
+        // 默认配置下总闸关闭 —— 不触碰任何游戏内存
+        assert!(!crate::config::Config::default().probe_instances);
+    }
+
+    #[test]
+    fn offsets_match_managed_layout() {
+        // Il2CppObject = klass(8) + monitor(8)
+        assert_eq!(OBJ_HDR, 16);
+        // Il2CppArray = obj(16) + bounds(8) + max_length(8)
+        assert_eq!(ARRAY_VECTOR_OFF, 32);
+        // Il2CppString = obj(16) + length(4) + chars
+        assert_eq!(STR_LEN_OFF, 16);
+        assert_eq!(STR_CHARS_OFF, 20);
+    }
 }

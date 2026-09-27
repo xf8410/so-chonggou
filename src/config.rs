@@ -8,6 +8,11 @@
 //!
 //! 防闪退纪律：**本模块任何 fs / 锁操作都不得 panic** —— 所有的 lock 用
 //! poison 恢复（`unwrap_or_else(|p| p.into_inner())`），所有 fs 都走 Result。
+//!
+//! v0.3.0 新增 `probe_instances`：**默认 false**。实例枚举（FindObjectsOfType
+//! + Il2CppArray/String 直读）依赖我们对 il2cpp 运行时布局的假设，收益（/uitree、
+//! 动画提速）不足以承担默认开启的风险。要用必须显式打开 —— 打开后若任一符号
+//! 解析不到，代码逐级降级为空结果，不崩、不猜。
 
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
@@ -23,6 +28,11 @@ pub struct Config {
     pub anim_speed_multiplier: f32,
     pub target_frames: u32,
     pub log_ui_positions: bool,
+    /// 实例枚举总闸（FindObjectsOfType / Il2CppArray / Il2CppString 直读）。
+    /// 默认关 —— 见文件头说明。
+    pub probe_instances: bool,
+    /// /uitree 最多吐多少个 RectTransform（防超大 JSON）。
+    pub uitree_max: u32,
 }
 
 impl Default for Config {
@@ -34,6 +44,8 @@ impl Default for Config {
             anim_speed_multiplier: 20.0,
             target_frames: 3,
             log_ui_positions: false,
+            probe_instances: false,
+            uitree_max: 200,
         }
     }
 }
@@ -82,8 +94,11 @@ pub fn init(base_dir: Option<String>) {
         }
     }
 
+    // 先记闸门状态再 move —— cfg 下面要交给全局 CONFIG，不能再用
+    let gate_on = cfg.probe_instances;
+    *CONFIG.write().unwrap_or_else(|p| p.into_inner()) = cfg;
+
     if !source.is_empty() {
-        *CONFIG.write().unwrap_or_else(|p| p.into_inner()) = cfg;
         crate::chlog!(info, "配置已加载（来源 {source}）");
     } else {
         // 首次运行：默认配置尽量落一份（外部优先，宿主兜底），失败也不影响运行
@@ -92,10 +107,33 @@ pub fn init(base_dir: Option<String>) {
             Err(e) => crate::chlog!(warn, "配置仅内存生效（写入失败: {e}）"),
         }
     }
+
+    if !gate_on {
+        crate::chlog!(info, "实例枚举关闭（probe_instances=false）：/uitree 与动画提速不生效");
+    } else {
+        crate::chlog!(warn, "实例枚举已开启（probe_instances=true）：所有解析失败均降级为空，不崩");
+    }
 }
 
 pub fn get() -> Config {
     CONFIG.read().unwrap_or_else(|p| p.into_inner()).clone()
+}
+
+/// 实例枚举总闸。
+pub fn probe_instances() -> bool {
+    get().probe_instances
+}
+
+/// 改配置（字段范围校验在调用方做，这里只负责加锁与落盘）。
+pub fn update(f: impl FnOnce(&mut Config)) {
+    {
+        let mut c = CONFIG.write().unwrap_or_else(|p| p.into_inner());
+        f(&mut c);
+    }
+    match save() {
+        Ok(p) => crate::chlog!(info, "配置已更新: {}", p.display()),
+        Err(e) => crate::chlog!(warn, "配置已更新但落盘失败({e})"),
+    }
 }
 
 /// 宿主目录里的配置文件路径。
@@ -195,6 +233,9 @@ mod tests {
         assert_eq!(c.http_port, 18765);
         assert_eq!(c.target_frames, 3);
         assert!(c.http_enabled);
+        // v0.3.0：实例枚举必须默认关闭，行为与 v0.2.0 完全一致
+        assert!(!c.probe_instances);
+        assert_eq!(c.uitree_max, 200);
     }
 
     #[test]
@@ -203,9 +244,10 @@ mod tests {
         let s = serde_json::to_string(&c).unwrap();
         let back: Config = serde_json::from_str(&s).unwrap();
         assert_eq!(back.http_port, c.http_port);
-        // 缺字段也能解析（serde default）
+        // 缺字段也能解析（serde default）—— 老配置文件直接兼容
         let partial: Config = serde_json::from_str("{\"http_port\":18766}").unwrap();
         assert_eq!(partial.http_port, 18766);
         assert_eq!(partial.target_frames, 3);
+        assert!(!partial.probe_instances);
     }
 }
