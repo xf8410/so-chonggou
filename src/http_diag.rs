@@ -4,15 +4,22 @@
 //! 首选端口尝试 bind，被占自动顺延（18765→18766→…），并把实际端口写入
 //! 外部媒体目录 + 宿主数据目录（都 best-effort），同时打日志 —— 两个 SO
 //! 可以共存，Agora 指哪个端口就读哪个 SO 的数据。
+//!
+//! v0.3.0 路由表新增：
+//! - `GET /uitree`        读 RectTransform 位置树（文字位置不对排查）
+//! - `GET /uitree/refresh` 重新抓一次再返回
+//! - `POST /config`       改配置（body 为 JSON 对象）；返回改后的完整配置
 
 use once_cell::sync::Lazy;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 static PORT: AtomicUsize = AtomicUsize::new(0);
 static START: Lazy<Instant> = Lazy::new(Instant::now);
+
+const ROUTES: &str = "/health /status /logs /hooks /anim /uitree /uitree/refresh /config";
 
 pub fn start(base_dir: Option<String>) {
     let spawned = std::thread::Builder::new()
@@ -39,7 +46,7 @@ fn run(base_dir: Option<String>) {
         match TcpListener::bind(("127.0.0.1", port)) {
             Ok(listener) => {
                 PORT.store(port as usize, Ordering::Relaxed);
-                crate::chlog!(info, "诊断 HTTP 已监听 127.0.0.1:{port} (端点: /health /status /logs /hooks /anim /config)");
+                crate::chlog!(info, "诊断 HTTP 已监听 127.0.0.1:{port} (端点: {ROUTES})");
                 write_port_file(&base_dir, port);
                 serve(listener);
                 return;
@@ -82,34 +89,59 @@ fn serve(listener: TcpListener) {
     }
 }
 
-fn handle_conn(stream: std::net::TcpStream) -> Option<()> {
-    let mut reader = BufReader::new(stream.try_clone().ok()?);
+struct Req {
+    method: String,
+    path: String,
+    body: String,
+}
+
+fn read_request(reader: &mut BufReader<std::net::TcpStream>) -> Option<Req> {
     let mut line = String::new();
     reader.read_line(&mut line).ok()?;
-    let path = line.split_whitespace().nth(1)?.to_string();
+    let mut parts = line.split_whitespace();
+    let method = parts.next()?.to_owned();
+    let path = parts.next()?.to_owned();
 
-    // 排干请求头（Connection: close 前必须读完，否则对端半开）
+    let mut content_length = 0usize;
     loop {
         let mut h = String::new();
         let n = reader.read_line(&mut h).ok()?;
         if n == 0 || h == "\r\n" || h == "\n" {
             break;
         }
+        if let Some(v) = h.to_ascii_lowercase().strip_prefix("content-length:") {
+            content_length = v.trim().parse().unwrap_or(0);
+        }
     }
 
-    let (route, query) = match path.split_once('?') {
-        Some((r, q)) => (r.to_owned(), Some(q.to_owned())),
-        None => (path.clone(), None),
-    };
+    // 封顶 64 KiB —— 诊断服务不该被一个畸形 Content-Length 撑爆内存
+    let mut body = vec![0u8; content_length.min(64 * 1024)];
+    if !body.is_empty() {
+        reader.read_exact(&mut body).ok()?;
+    }
+    Some(Req {
+        method,
+        path,
+        body: String::from_utf8_lossy(&body).into_owned(),
+    })
+}
 
-    let (code, body) = route_response(&route, query);
+fn handle_conn(stream: std::net::TcpStream) -> Option<()> {
+    let mut reader = BufReader::new(stream.try_clone().ok()?);
+    let req = read_request(&mut reader)?;
+    let (code, body) = route_response(&req);
     respond(stream, code, body);
     Some(())
 }
 
-fn route_response(route: &str, query: Option<String>) -> (&'static str, String) {
-    match route {
-        "/health" => (
+fn route_response(req: &Req) -> (&'static str, String) {
+    let (route, query) = match req.path.split_once('?') {
+        Some((r, q)) => (r, Some(q.to_owned())),
+        None => (req.path.as_str(), None),
+    };
+
+    match (req.method.as_str(), route) {
+        ("GET", "/health") => (
             "200 OK",
             serde_json::json!({
                 "ok": true,
@@ -120,7 +152,7 @@ fn route_response(route: &str, query: Option<String>) -> (&'static str, String) 
             })
             .to_string(),
         ),
-        "/status" => (
+        ("GET", "/status") => (
             "200 OK",
             serde_json::json!({
                 "config": crate::config::get(),
@@ -129,7 +161,7 @@ fn route_response(route: &str, query: Option<String>) -> (&'static str, String) 
             })
             .to_string(),
         ),
-        "/logs" => {
+        ("GET", "/logs") => {
             let n: usize = query
                 .as_deref()
                 .and_then(|q| q.split('&').find(|kv| kv.starts_with("n=")))
@@ -140,26 +172,89 @@ fn route_response(route: &str, query: Option<String>) -> (&'static str, String) 
                 serde_json::to_string(&crate::logging::recent(n)).unwrap_or_else(|_| "[]".to_owned()),
             )
         }
-        "/hooks" => {
+        ("GET", "/hooks") => {
             let hooks: Vec<_> = crate::guard::own_hooks()
                 .into_iter()
                 .map(|(o, h)| serde_json::json!({"orig": format!("{o:#x}"), "hook": format!("{h:#x}")}))
                 .collect();
             ("200 OK", serde_json::json!({ "count": hooks.len(), "hooks": hooks }).to_string())
         }
-        "/anim" => ("200 OK", crate::training_anim::snapshot_json()),
-        "/config" => (
-            "200 OK",
-            serde_json::json!({
-                "config": crate::config::get(),
-                "paths": {
-                    "external": crate::config::external_dir(),
-                    "host": crate::config::host_config_path().map(|p| p.display().to_string()),
+        ("GET", "/anim") => ("200 OK", crate::training_anim::snapshot_json()),
+        ("GET", "/uitree") => ("200 OK", crate::ui_probe::snapshot_json()),
+        ("GET", "/uitree/refresh") => {
+            crate::ui_probe::refresh();
+            ("200 OK", crate::ui_probe::snapshot_json())
+        }
+        ("POST", "/config") => match serde_json::from_str::<serde_json::Value>(&req.body) {
+            Err(e) => (
+                "400 Bad Request",
+                serde_json::json!({"error": format!("body 不是合法 JSON: {e}")}).to_string(),
+            ),
+            Ok(v) => {
+                if let Some(obj) = v.as_object() {
+                    let mut bad = Vec::new();
+                    crate::config::update(|c| {
+                        for (k, val) in obj {
+                            match k.as_str() {
+                                "http_enabled" => {
+                                    c.http_enabled = val.as_bool().unwrap_or(c.http_enabled)
+                                }
+                                "http_port" => {
+                                    if let Some(p) = val.as_u64() {
+                                        if (1024..=65535).contains(&p) {
+                                            c.http_port = p as u16;
+                                        }
+                                    }
+                                }
+                                "anim_mode" => {
+                                    if let Some(m) = val.as_str() {
+                                        if ["off", "measure", "speed"].contains(&m) {
+                                            c.anim_mode = m.to_owned();
+                                        }
+                                    }
+                                }
+                                "anim_speed_multiplier" => {
+                                    if let Some(f) = val.as_f64() {
+                                        if f.is_finite() && f > 0.0 && f <= 1000.0 {
+                                            c.anim_speed_multiplier = f as f32;
+                                        }
+                                    }
+                                }
+                                "target_frames" => {
+                                    if let Some(n) = val.as_u64() {
+                                        if n >= 1 {
+                                            c.target_frames = n as u32;
+                                        }
+                                    }
+                                }
+                                "log_ui_positions" => {
+                                    c.log_ui_positions = val.as_bool().unwrap_or(c.log_ui_positions)
+                                }
+                                "probe_instances" => {
+                                    c.probe_instances = val.as_bool().unwrap_or(c.probe_instances)
+                                }
+                                "uitree_max" => {
+                                    if let Some(n) = val.as_u64() {
+                                        if n >= 1 {
+                                            c.uitree_max = n.min(2000) as u32;
+                                        }
+                                    }
+                                }
+                                other => bad.push(other.to_owned()),
+                            }
+                        }
+                    });
+                    if !bad.is_empty() {
+                        crate::chlog!(warn, "/config 忽略未知字段: {bad:?}");
+                    }
                 }
-            })
-            .to_string(),
+                ("200 OK", serde_json::json!({"config": crate::config::get()}).to_string())
+            }
+        },
+        _ => (
+            "404 Not Found",
+            serde_json::json!({"error": "no such route", "routes": ROUTES}).to_string(),
         ),
-        _ => ("404 Not Found", serde_json::json!({"error": "no such route", "routes": ["/health", "/status", "/logs?n=200", "/hooks", "/anim", "/config"]}).to_string()),
     }
 }
 
