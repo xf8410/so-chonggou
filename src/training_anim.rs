@@ -37,6 +37,7 @@ const NS: &str = "UnityEngine";
 const APPLY_COOLDOWN: Duration = Duration::from_secs(2);
 const SEEN_CAP: usize = 64;
 
+/// IL2CPP `void Animator::set_speed(float)` 的 C 签名。
 type SetSpeedFn = unsafe extern "C" fn(this: *mut c_void, value: f32);
 
 static PLAYS: AtomicUsize = AtomicUsize::new(0);
@@ -246,9 +247,24 @@ mod tests {
     }
 
     #[test]
-    fn speed_callable_shape() {
-        // SetSpeedFn 的 C 签名必须与 IL2CPP void set_speed(float) 对齐
-        let f: SetSpeedFn = unsafe { std::mem::transmute(0usize) };
-        assert!(f as usize == 0);
+    fn apply_speed_reports_failure_without_host() {
+        // 无宿主 API 时 get_method_addr 必为 None —— 必须记 failed 而不是崩。
+        // （曾有一条 "speed_callable_shape" 用 transmute(0usize) 造空函数指针，
+        //   那是 UB 且没测出任何东西，编译器已点名，已删。）
+        let before = SPEED_FAILED.load(Ordering::Relaxed);
+        apply_speed_now(20.0);
+        assert!(
+            SPEED_FAILED.load(Ordering::Relaxed) > before,
+            "无宿主时应计入 failed"
+        );
+    }
+
+    #[test]
+    fn note_play_never_panics() {
+        // measure 模式下 note_play 只计数，不落刀；空指针也照常
+        let before = PLAYS.load(Ordering::Relaxed);
+        note_play(0, 0);
+        note_play(usize::MAX, 1);
+        assert_eq!(PLAYS.load(Ordering::Relaxed), before + 2);
     }
 }
